@@ -19,3 +19,6 @@ deployed.marker
 # OS/editor
 .DS_Store
 .vscode/
+
+# Claude Code local state
+.claude/

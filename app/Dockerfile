@@ -2,6 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Patch OS packages at build time so known-fixed CVEs in the base image
+# (e.g. perl-base) aren't shipped just because the upstream tag is stale.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 1000 appuser \
     && useradd --uid 1000 --gid appuser --shell /bin/false --create-home appuser
 

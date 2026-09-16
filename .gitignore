@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Cosign local key pairs (never commit private keys)
+cosign.key
+cosign.pub
+
+# Pipeline output artifacts (generated, not source)
+trivy-report.json
+trivy-results.sarif
+sbom.json
+facts.json
+cosign-verify.json
+deployed.marker
+
+# OS/editor
+.DS_Store
+.vscode/

@@ -1,0 +1,175 @@
+name: Secure Container CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  security-events: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-scan-sign:
+    name: Build, Scan, SBOM & Sign
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        id: vars
+        run: |
+          IMAGE="${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image }}:${{ github.sha }}
+            ${{ steps.vars.outputs.image }}:latest
+
+      - name: Trivy scan (JSON report)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "${{ steps.vars.outputs.image }}@${{ steps.build.outputs.digest }}"
+          format: json
+          output: trivy-report.json
+          severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+          exit-code: "0"
+
+      - name: Trivy scan (SARIF for code scanning)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "${{ steps.vars.outputs.image }}@${{ steps.build.outputs.digest }}"
+          format: sarif
+          output: trivy-results.sarif
+          severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+          exit-code: "0"
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: "${{ steps.vars.outputs.image }}@${{ steps.build.outputs.digest }}"
+          format: cyclonedx-json
+          output-file: sbom.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image with Cosign (keyless)
+        run: |
+          cosign sign --yes "${{ steps.vars.outputs.image }}@${{ steps.build.outputs.digest }}"
+
+      - name: Attach SBOM as signed attestation
+        run: |
+          cosign attest --yes \
+            --predicate sbom.json \
+            --type cyclonedx \
+            "${{ steps.vars.outputs.image }}@${{ steps.build.outputs.digest }}"
+
+      - name: Verify Cosign signature
+        id: verify
+        run: |
+          if cosign verify \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${{ steps.vars.outputs.image }}@${{ steps.build.outputs.digest }}" > cosign-verify.json; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build facts.json for policy gate
+        run: |
+          python3 scripts/build-facts.py \
+            --trivy-report trivy-report.json \
+            --signed "${{ steps.verify.outputs.signed }}" \
+            --out facts.json
+          cat facts.json
+
+      - name: Upload pipeline artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-artifacts
+          path: |
+            facts.json
+            sbom.json
+            trivy-report.json
+            trivy-results.sarif
+            cosign-verify.json
+          retention-days: 14
+
+  policy-gate:
+    name: OPA/Conftest Policy Gate
+    needs: build-scan-sign
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download pipeline artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pipeline-artifacts
+
+      - name: Install Conftest
+        run: |
+          CONFTEST_VERSION=0.56.0
+          curl -sSL -o conftest.tar.gz "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar xzf conftest.tar.gz
+          sudo mv conftest /usr/local/bin
+
+      - name: Show facts under evaluation
+        run: cat facts.json
+
+      - name: Run policy gate
+        run: conftest test facts.json -p policy/deny.rego
+
+  deploy:
+    name: Deploy (simulated)
+    needs: policy-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Simulated deployment
+        run: |
+          echo "Policy gate passed: image is signed and free of critical CVEs."
+          echo "Deploying image ${{ needs.build-scan-sign.outputs.image }}@${{ needs.build-scan-sign.outputs.digest }}..."
+          echo "deployed at $(date -u +%Y-%m-%dT%H:%M:%SZ) -> ${{ needs.build-scan-sign.outputs.image }}@${{ needs.build-scan-sign.outputs.digest }}" > deployed.marker
+          cat deployed.marker
+
+      - name: Upload deployment marker
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-marker
+          path: deployed.marker

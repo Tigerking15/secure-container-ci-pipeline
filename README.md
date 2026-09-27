@@ -27,9 +27,14 @@ enforced as code (Rego), not a manual checklist.
 ## Architecture
 
 ```
- push to main
+ push to main / PR
       │
       ▼
+┌─────────────────────────────┐
+│ policy-unit-tests (CI job)  │
+│  conftest verify -p policy  │──> verifies deny_test.rego (Shift-Left)
+└──────────────┬───────────────┘
+               ▼ (only if policy tests pass)
 ┌─────────────────────────────┐
 │ build-scan-sign (CI job)    │
 │  1. docker build            │
@@ -46,6 +51,7 @@ enforced as code (Rego), not a manual checklist.
 │ policy-gate (CI job)        │
 │  conftest test facts.json   │──> ALLOW or DENY (Rego policy)
 │  -p policy/deny.rego        │
+│  generate-summary.py        │──> PR security comment & run dashboard
 └──────────────┬───────────────┘
                ▼ (only if allowed)
 ┌─────────────────────────────┐
@@ -63,7 +69,7 @@ enforced as code (Rego), not a manual checklist.
 | Vulnerability scan   | [Trivy](https://github.com/aquasecurity/trivy) |
 | SBOM generation      | [Syft](https://github.com/anchore/syft)      |
 | Image signing        | [Cosign](https://github.com/sigstore/cosign) — **keyless**, via Sigstore + GitHub OIDC |
-| Policy gate          | [OPA](https://www.openpolicyagent.org/) via [Conftest](https://www.conftest.dev/) |
+| Policy gate & tests  | [OPA](https://www.openpolicyagent.org/) via [Conftest](https://www.conftest.dev/) |
 | CI                   | GitHub Actions                               |
 
 ### Why keyless signing?
@@ -76,12 +82,12 @@ public **Rekor transparency log**, so anyone can verify *which workflow, in
 which repo, on which commit* produced a signature — without any team ever
 handling a long-lived private key.
 
-### Why a Rego policy instead of `if` statements in YAML?
+### Why automated policy unit tests?
 
-The gate logic (`policy/deny.rego`) is decoupled from the pipeline plumbing.
-It can be unit-tested, versioned, and reused across pipelines, and it's easy
-to demo live: change one line in the policy or in `facts.json` and re-run
-`conftest` to show the gate flip from ALLOW to DENY.
+Security policies are mission-critical code. Before deploying or building
+images, `policy/deny_test.rego` formally tests `policy/deny.rego` across
+positive and negative cases (unsigned rejection, critical CVE threshold,
+high/medium non-blocking allowances) in milliseconds.
 
 ## Repository layout
 
@@ -92,11 +98,14 @@ app/
   Dockerfile
 policy/
   deny.rego           Conftest policy: deny if unsigned or critical CVEs > 0
+  deny_test.rego      Automated unit test suite verifying policy logic edge cases
 scripts/
   build-facts.py      Trivy JSON + signed flag -> facts.json
-  local-pipeline.ps1  Run build/scan/SBOM/gate locally on Windows
+  generate-summary.py Generates markdown security report for PR comments and summaries
+  local-pipeline.sh   Run build/scan/SBOM/gate locally on macOS / Linux (Bash)
+  local-pipeline.ps1  Run build/scan/SBOM/gate locally on Windows (PowerShell)
 .github/workflows/
-  pipeline.yml        build-scan-sign -> policy-gate -> deploy
+  pipeline.yml        policy-unit-tests -> build-scan-sign -> policy-gate -> deploy
 ```
 
 ## Running it
@@ -117,19 +126,35 @@ Check the run in the **Actions** tab. Pipeline artifacts (`facts.json`,
 `sbom.json`, `trivy-report.json`, `trivy-results.sarif`,
 `cosign-verify.json`) are uploaded to the run for inspection.
 
-### Locally (Windows / PowerShell)
+### In Pull Requests (Interactive Security Summary)
+
+When a Pull Request is opened or updated, CI runs all security stages and automatically publishes or updates a sticky comment directly on the PR with:
+- 🚦 **Policy Gate Decision**: 🟢 **PASSED** or 🔴 **BLOCKED** with clear violation diagnostics.
+- ✍️ **Cosign Signature Status**: Verification status via Sigstore OIDC & Rekor transparency log.
+- 🛡️ **Vulnerability Breakdown**: Critical, High, Medium, Low counts + detailed table of findings.
+- 📋 **SBOM Inventory**: Direct vs. transitive application packages & base OS packages.
+
+### Locally on macOS / Linux (Bash)
 
 Requires Docker Desktop and Python 3.
 
-```powershell
-./scripts/local-pipeline.ps1
+```bash
+# Make script executable (first time only)
+chmod +x scripts/local-pipeline.sh
+
+# Run pipeline (simulating a signed, compliant image -> gate PASSES)
+./scripts/local-pipeline.sh
+
+# Run ONLY the automated Rego policy unit tests
+./scripts/local-pipeline.sh --test-only
+
+# Demo a policy violation (simulating an unsigned image -> gate FAILS)
+./scripts/local-pipeline.sh --unsigned
 ```
 
-This builds the image, runs Trivy and Syft via their official Docker images
-(no local install needed), builds `facts.json`, and evaluates the policy
-with Conftest. Real Cosign signing requires a pushed registry image (that's
-what the CI job does) — locally, the script takes a `-Signed` flag to
-simulate the signature check:
+### Locally on Windows (PowerShell)
+
+Requires Docker Desktop and Python 3.
 
 ```powershell
 # Simulate a signed, scanned image -> gate should PASS
@@ -143,11 +168,8 @@ simulate the signature check:
 
 Two easy ways to show the gate actually blocking something:
 
-- **Unsigned image**: run `./scripts/local-pipeline.ps1 -Signed:$false` and
-  show Conftest's DENY output.
-- **Critical CVE**: temporarily point `app/Dockerfile`'s base image at an old
-  tag known to have CRITICAL CVEs (e.g. `python:3.9-slim` or older), rerun
-  the pipeline, and show Trivy's findings flow through to a DENY.
+- **Unsigned image**: run `./scripts/local-pipeline.sh --unsigned` (or Windows: `./scripts/local-pipeline.ps1 -Signed:$false`) and show Conftest's DENY output.
+- **Critical CVE**: temporarily point `app/Dockerfile`'s base image at an old tag known to have CRITICAL CVEs (e.g. `python:3.9-slim` or older), rerun the pipeline, and show Trivy's findings flow through to a DENY.
 
 ### Verifying a signed image from outside CI
 

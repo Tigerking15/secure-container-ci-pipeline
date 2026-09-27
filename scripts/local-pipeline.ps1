@@ -42,6 +42,10 @@ function Step($msg) {
     Write-Host "==> $msg" -ForegroundColor Cyan
 }
 
+Step "Running Rego policy unit tests (policy/deny_test.rego)"
+docker run --rm -v "${root}:/project" -w /project openpolicyagent/conftest:v0.56.0 verify -p policy
+if ($LASTEXITCODE -ne 0) { throw "Rego policy unit tests failed! Deployment rules are broken." }
+
 Step "Building Docker image ($ImageName)"
 docker build -t $ImageName ./app
 if ($LASTEXITCODE -ne 0) { throw "docker build failed" }

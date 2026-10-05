@@ -14,6 +14,8 @@ trivy-results.sarif
 sbom.json
 facts.json
 cosign-verify.json
+conftest-output.txt
+summary.md
 deployed.marker
 
 # OS/editor

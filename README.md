@@ -205,3 +205,5 @@ cosign verify-attestation \
 - **Transparency log (Rekor)**: even if attackers compromised the registry,
   they can't forge a valid signature for a different artifact without it
   showing up as a public, auditable record.
+
+<!-- demo -->

@@ -24,3 +24,4 @@ deployed.marker
 
 # Claude Code local state
 .claude/
+demo-out/

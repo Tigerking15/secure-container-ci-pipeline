@@ -44,8 +44,15 @@ function Run-Scenario($name, $base, $signed) {
     if ($LASTEXITCODE -ne 0) { Write-Host 'build failed' -ForegroundColor Red; return [int]2 }
 
     Step "[$name] Trivy vulnerability scan"
-    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${out}:/output" aquasec/trivy image --quiet --format json --output /output/trivy-report.json $tag | Out-Host
-    if ($LASTEXITCODE -ne 0) { Write-Host 'trivy failed' -ForegroundColor Red; return 2 }
+    # The vulnerability DB is cached in a Docker volume; if the network is down, reuse the cached copy
+    $trivy = @('run','--rm','-v','/var/run/docker.sock:/var/run/docker.sock','-v',"${out}:/output",'-v','trivy-cache:/root/.cache/','aquasec/trivy')
+    $scan  = @('image','--quiet','--format','json','--output','/output/trivy-report.json')
+    docker @trivy @scan $tag 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'DB update failed, retrying with cached vulnerability DB' -ForegroundColor Yellow
+        docker @trivy @scan '--skip-db-update' '--skip-java-db-update' $tag 2>&1 | Out-Host
+    }
+    if ($LASTEXITCODE -ne 0) { Write-Host 'trivy failed (no cached DB; run once with working internet)' -ForegroundColor Red; return 2 }
 
     Step "[$name] Syft SBOM (CycloneDX)"
     docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${out}:/output" anchore/syft $tag -o cyclonedx-json=/output/sbom.json | Out-Null
